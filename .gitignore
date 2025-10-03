@@ -52,3 +52,102 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# ---------------------------------------------
+# Node / npm / JavaScript / TypeScript
+# Based on github/gitignore: Node.gitignore
+# ---------------------------------------------
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Compiled binary addons
+build/Release/
+
+# Dependency directories
+node_modules/
+jspm_packages/
+bower_components/
+web_modules/
+
+# Caches and build outputs
+.cache/
+.parcel-cache/
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.turbo/
+.docusaurus/
+.svelte-kit/
+.vite/
+.astro/
+.nuxt/
+.next/
+.serverless/
+.fusebox/
+.dynamodb/
+.vuepress/dist/
+.vercel/
+.wrangler/
+.remix/
+.expo/
+.vscode-test/
+dist/
+out/
+public/build/
+build/
+
+# TypeScript
+*.tsbuildinfo
+
+# Optional caches
+.npm/
+.eslintcache
+.stylelintcache
+
+# Package manager artifacts
+.pnp.cjs
+.pnp.loader.mjs
+.pnp.data.json
+.pnp.meta.json
+.pnp.map.json
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.yarn/patches/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+
+# System files
+.DS_Store
+
+# TernJS port file
+.tern-port
