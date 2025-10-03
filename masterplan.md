@@ -27,6 +27,7 @@ interface SourceAdapter {
 interface Mapper {
   toDest(srcRec: Record): Record
   toSource(destRec: Record): Record
+  //Note: Concrete Mapper implementations live in the job-specific files referenced in YAML
 }
 interface LinkIndex {
   /** links */
@@ -42,6 +43,7 @@ interface LinkIndex {
   insertRun(run: RunSummary): void
 }
 ```
+
 
 ---
 
@@ -195,7 +197,7 @@ jobs:
 
 | Order | Task | LLM-assist? | Human notes |
 |-------|------|-------------|-------------|
-| 1 | **Init monorepo** (`pnpm workspaces` / `yarn workspaces`) | ✅ | – |
+| 1 | **Init monorepo**  | ✅ | – |
 | 2 | Scaffold `@syncframe/core` with typed interfaces & empty engine | ✅ | – |
 | 3 | Implement **InMemoryAdapter** & **InMemoryLinkIndex** for tests | ✅ | – |
 | 4 | Write engine logic (pull-map-push-persist loop, retry, throttle) | ✅ | – |

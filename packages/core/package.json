@@ -1,0 +1,28 @@
+{
+  "name": "@syncframe/core",
+  "version": "0.1.0",
+  "description": "Core contracts, sync engine, and retry/throttle logic for SyncFrame",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "echo \"Tests coming soon\""
+  },
+  "keywords": ["sync", "bidirectional", "api", "integration"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
+
+
