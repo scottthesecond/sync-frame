@@ -1,0 +1,215 @@
+## SyncFrame Master Plan
+
+---
+
+### 1 – High-Level Architecture  
+| Layer | npm Scope | Responsibility | Depends On |
+|-------|----------|----------------|------------|
+| **Core** | `@syncframe/core` | Contracts, sync engine, retry/throttle logic | none |
+| **Adapters** | `@syncframe/adapter-*` | Translate remote API ⇆ `ChangeSet` | Core |
+| **LinkIndex** | `@syncframe/linkindex-*` | Persist links, cursors, run logs | Core |
+| **CLI** | `@syncframe/cli` | Parse YAML / env, load plug-ins, invoke engine | Core + adapters + linkindex |
+
+> Core never imports adapters; CLI wires everything together at runtime.
+
+---
+
+### 2 – Core Contracts  
+```ts
+// types only – no implementation
+interface Cursor       { value: string | null }
+interface ChangeSet    { upserts: Record[]; deletes: RecordID[] }
+interface SourceAdapter {
+  getUpdates(cursor: Cursor): Promise<ChangeSet>
+  applyChanges(cs: ChangeSet): Promise<void>
+  serializeCursor(cur: Cursor): string
+}
+interface Mapper {
+  toDest(srcRec: Record): Record
+  toSource(destRec: Record): Record
+}
+interface LinkIndex {
+  /** links */
+  upsertLink(sourceId: string, destId: string): void
+  findDest(sourceId: string): string | null
+  findSource(destId: string): string | null
+  /** cursors */
+  loadCursor(jobId: string, side: SideKey): Cursor
+  saveCursor(jobId: string, side: SideKey, cursor: Cursor): void
+  /** job state & runs */
+  setJobDisabled(jobId: string, ts: Date): void
+  isJobDisabled(jobId: string): boolean
+  insertRun(run: RunSummary): void
+}
+```
+
+---
+
+### 3 – Database Schema (SQLite / Postgres impls)  
+```sql
+links(
+  src_adapter   TEXT,
+  src_table     TEXT,
+  src_id        TEXT,
+  dest_adapter  TEXT,
+  dest_table    TEXT,
+  dest_id       TEXT,
+  last_sync_ts  TIMESTAMP,
+  PRIMARY KEY (src_adapter, src_table, src_id,
+               dest_adapter, dest_table, dest_id)
+);
+
+cursors(
+  job_id        TEXT,
+  adapter       TEXT,
+  table_name    TEXT,
+  cursor_token  TEXT,
+  fail_count    INT    DEFAULT 0,
+  disabled_at   TIMESTAMP NULL,
+  PRIMARY KEY (job_id, adapter, table_name)
+);
+
+runs(
+  run_id        TEXT PRIMARY KEY,
+  job_id        TEXT,
+  started_at    TIMESTAMP,
+  ended_at      TIMESTAMP,
+  status        TEXT,                   -- success / partial / failed
+  summary_json  JSONB
+);
+
+conflicts(                       -- only if conflict_policy=manual
+  job_id        TEXT,
+  src_id        TEXT,
+  dest_id       TEXT,
+  payload_json  JSONB,
+  detected_at   TIMESTAMP
+);
+```
+
+---
+
+### 4 – YAML Configuration  
+```yaml
+linkindex:
+  driver: sqlite
+  conn:   ./syncframe.db            # DSN or path
+
+jobs:
+  - id: airtable-revel__webflow-videos
+    schedule: "*/5 * * * *"         # cron; omit for manual/CLI-only
+
+    sides:
+      airtable:
+        adapter: airtable
+        table:   Videos
+        creds:
+          apiKey:   ${AIRTABLE_TOKEN}
+          baseId:   app123
+
+        throttle:                  # optional; defaults shown
+          max_reqs: 50
+          interval_sec: 60
+          batch_size: 10
+
+      webflow:
+        adapter: webflow
+        collection: videos
+        creds:
+          token: ${WEBFLOW_TOKEN}
+
+    mappings:                      # mandatory A→B and B→A
+      airtable→webflow: ./maps/at_to_wf.js
+      webflow→airtable: ./maps/wf_to_at.js
+
+    retries:                       # optional; defaults shown
+      max_attempts: 5
+      backoff_sec: 30
+      disable_job_after: 20
+
+    conflict_policy: last_writer_wins   # or manual
+```
+
+*Environment variables are resolved by CLI before objects reach core.*
+
+---
+
+### 5 – Engine Flow (per job)  
+1. **Skip** if `disabled_at` is non-NULL.  
+2. **Pull phase:**  
+   - `getUpdates(cursorA)` → `ChangeSetA`  
+   - `getUpdates(cursorB)` → `ChangeSetB`  
+3. **Transform & Dedup:**  
+   - map each record through appropriate `Mapper` function.  
+   - use `LinkIndex` to find opposite IDs; prevent echoes.  
+4. **Push phase (batched):**  
+   - obey per-side `batch_size` & `throttle` window.  
+   - retry with exponential back-off ≤ `max_attempts`.  
+5. **Persist:** cursors, link upserts, `runs` summary row.  
+6. **Error handling:**  
+   - after `max_attempts`, increment `fail_count`.  
+   - if `fail_count` ≥ `disable_job_after`, set `disabled_at` timestamp.  
+
+---
+
+### 6 – Error / Deletion / Conflict Rules  
+| Area | Decision |
+|------|----------|
+| **Soft delete only** | Adapters map a boolean `isDeleted` (or similar). Dest adapter decides whether to hard-delete or soft-flag. |
+| **Conflict policies** | `last_writer_wins` (timestamp compare) **or** `manual` → record in `conflicts` table; change skipped. |
+| **Retry** | Configurable; exponential back-off starting at `backoff_sec`. |
+| **Throttle** | Sliding-window counter: `max_reqs` within `interval_sec`. |
+
+---
+
+### 7 – Observability  
+* Structured JSON to **stdout** (for real-time tailing).  
+* Row in `runs` table summarising: totals, retries, duration, status, top-level error list.  
+* Prune `runs` older than 30 days via nightly CLI flag (`syncframe prune`).
+
+---
+
+### 8 – Testing Strategy  
+| Layer | Automated via LLM-generated code | Human setup |
+|-------|----------------------------------|-------------|
+| Core engine | unit/integration using **InMemoryAdapter** & **InMemoryLinkIndex** (no external APIs) | – |
+| Adapter contract tests | fixtures auto-generated by LLM; replay with `msw/nock` | create sandbox Airtable base & Webflow collection, hand API keys to CI secrets |
+| CLI end-to-end | LLM can script Docker Compose (SQLite + node) | verify manually the first run; thereafter CI |
+
+---
+
+### 9 – Security & Secrets  
+* .env files only (12-factor); no secret manager yet.  
+* Adapters must **not** log raw creds.
+
+---
+
+### 10 – Open Items Deferred  
+* Schema migrations (future).  
+* Concurrency / job locking (future).  
+* Metrics endpoint (future).  
+
+---
+
+## Implementation To-Do List
+
+| Order | Task | LLM-assist? | Human notes |
+|-------|------|-------------|-------------|
+| 1 | **Init monorepo** (`pnpm workspaces` / `yarn workspaces`) | ✅ | – |
+| 2 | Scaffold `@syncframe/core` with typed interfaces & empty engine | ✅ | – |
+| 3 | Implement **InMemoryAdapter** & **InMemoryLinkIndex** for tests | ✅ | – |
+| 4 | Write engine logic (pull-map-push-persist loop, retry, throttle) | ✅ | – |
+| 5 | Create `@syncframe/linkindex-sqlite` (tables above, Knex/Drizzle) | ✅ | – |
+| 6 | Build `@syncframe/cli` (YAML parse, env expand, dynamic import) | ✅ | – |
+| 7 | Draft **example YAML** + dummy mapper fn | ✅ | – |
+| 8 | Manual smoke test with in-memory adapters (`syncframe --once`) | – | Dev runs locally |
+| 9 | Build `adapter-airtable` (read/write, cursor via offset token) | Partial | Needs sandbox base & API key |
+| 10 | Build `adapter-webflow` (read/write, cursor via `updated_on`) | Partial | Needs sandbox site & token |
+| 11 | Integration test Airtable↔Webflow through SQLite LinkIndex | – | Dev validates data |
+| 12 | Add `runs` persistence & stdout JSON logger | ✅ | – |
+| 13 | Document everything (`DESIGN.md`, README with YAML schema) | ✅ | – |
+| 14 | Optional: write prune script & GitHub Actions CI pipeline | ✅ | – |
+
+---
+
+When the list hits step 11 with green tests, SyncFrame MVP is production-ready for the first 2-way job.
