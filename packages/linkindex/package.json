@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "test": "echo \"Tests coming soon\""
+    "test": "jest"
   },
   "keywords": ["sync", "linkindex", "testing", "in-memory"],
   "author": "",

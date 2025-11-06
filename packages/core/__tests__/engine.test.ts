@@ -39,10 +39,14 @@ function createTestEngine(config?: Partial<JobConfig>): {
     jobId: "test-job",
     sideA: {
       adapter: adapterA,
+      adapterName: "sideA",
+      tableName: "tableA",
       sideKey: "sideA",
     },
     sideB: {
       adapter: adapterB,
+      adapterName: "sideB",
+      tableName: "tableB",
       sideKey: "sideB",
     },
     mapperAtoB: new IdentityMapper(),
@@ -85,8 +89,8 @@ describe("SyncEngine", () => {
       // Verify links created
       const links = linkIndex.getAllLinks();
       expect(links).toHaveLength(2);
-      expect(links.find((l) => l.sourceId === "a1" && l.destId === "a1")).toBeDefined();
-      expect(links.find((l) => l.sourceId === "a2" && l.destId === "a2")).toBeDefined();
+      expect(links.find((l) => l.sourceId === "a1" && l.destId === "a1" && l.sourceAdapter === "sideA" && l.destAdapter === "sideB")).toBeDefined();
+      expect(links.find((l) => l.sourceId === "a2" && l.destId === "a2" && l.sourceAdapter === "sideA" && l.destAdapter === "sideB")).toBeDefined();
     });
   });
 
@@ -184,7 +188,7 @@ describe("SyncEngine", () => {
       await engine.run();
 
       // Verify link exists
-      const destId = await linkIndex.findDest("a1");
+      const destId = await linkIndex.findDest("sideA", "tableA", "a1");
       expect(destId).toBe("a1");
 
       // Update record in A - use a new timestamp to ensure it's detected
@@ -201,7 +205,7 @@ describe("SyncEngine", () => {
       expect(recordsB.filter((r) => r.id === "a1")).toHaveLength(1); // No duplicates
 
       // Verify link still exists
-      const destIdAfter = await linkIndex.findDest("a1");
+      const destIdAfter = await linkIndex.findDest("sideA", "tableA", "a1");
       expect(destIdAfter).toBe("a1");
     });
   });
@@ -215,7 +219,7 @@ describe("SyncEngine", () => {
       await engine.run();
 
       // Verify link exists
-      const destId = await linkIndex.findDest("a1");
+      const destId = await linkIndex.findDest("sideA", "tableA", "a1");
       expect(destId).toBe("a1");
 
       // Delete record in A
@@ -271,7 +275,7 @@ describe("SyncEngine", () => {
       await engine.run();
 
       // Verify link exists
-      const destId = await linkIndex.findDest("a1");
+      const destId = await linkIndex.findDest("sideA", "tableA", "a1");
       expect(destId).toBe("a1");
 
       // Modify same record in both sides - both have the same timestamp
@@ -300,10 +304,14 @@ describe("SyncEngine", () => {
         jobId: "test-job",
         sideA: {
           adapter: adapterA,
+          adapterName: "sideA",
+          tableName: "tableA",
           sideKey: "sideA",
         },
         sideB: {
           adapter: adapterB,
+          adapterName: "sideB",
+          tableName: "tableB",
           sideKey: "sideB",
           throttle: {
             maxReqs: 100,
@@ -427,7 +435,7 @@ describe("SyncEngine", () => {
       await engine.run();
 
       // Get cursor after first run
-      const cursorA1 = await linkIndex.loadCursor("test-job", "sideA");
+      const cursorA1 = await linkIndex.loadCursor("test-job", "sideA", "tableA");
       expect(cursorA1.value).not.toBeNull();
 
       // Second run - add more records
@@ -435,7 +443,7 @@ describe("SyncEngine", () => {
       await engine.run();
 
       // Get cursor after second run
-      const cursorA2 = await linkIndex.loadCursor("test-job", "sideA");
+      const cursorA2 = await linkIndex.loadCursor("test-job", "sideA", "tableA");
       expect(cursorA2.value).not.toBeNull();
       expect(cursorA2.value).not.toBe(cursorA1.value); // Should have advanced
 
