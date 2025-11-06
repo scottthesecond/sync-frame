@@ -8,7 +8,7 @@
 | **Core** | `@syncframe/core` | Contracts, sync engine, retry/throttle logic | none |
 | **Adapters** | `@syncframe/adapter-*` | Translate remote API ⇆ `ChangeSet` | Core |
 | **LinkIndex** | `@syncframe/linkindex-*` | Persist links, cursors, run logs | Core |
-| **CLI** | `@syncframe/cli` | Parse YAML / env, load plug-ins, invoke engine | Core + adapters + linkindex |
+| **CLI** | `@syncframe/cli` | Parse JSONC / env, load plug-ins, invoke engine | Core + adapters + linkindex |
 
 > Core never imports adapters; CLI wires everything together at runtime.
 
@@ -27,7 +27,7 @@ interface SourceAdapter {
 interface Mapper {
   toDest(srcRec: Record): Record
   toSource(destRec: Record): Record
-  //Note: Concrete Mapper implementations live in the job-specific files referenced in YAML
+  //Note: Concrete Mapper implementations live in the job-specific files referenced in JSONC config
 }
 interface LinkIndex {
   /** links */
@@ -91,45 +91,52 @@ conflicts(                       -- only if conflict_policy=manual
 
 ---
 
-### 4 – YAML Configuration  
-```yaml
-linkindex:
-  driver: sqlite
-  conn:   ./syncframe.db            # DSN or path
-
-jobs:
-  - id: airtable-revel__webflow-videos
-    schedule: "*/5 * * * *"         # cron; omit for manual/CLI-only
-
-    sides:
-      airtable:
-        adapter: airtable
-        table:   Videos
-        creds:
-          apiKey:   ${AIRTABLE_TOKEN}
-          baseId:   app123
-
-        throttle:                  # optional; defaults shown
-          max_reqs: 50
-          interval_sec: 60
-          batch_size: 10
-
-      webflow:
-        adapter: webflow
-        collection: videos
-        creds:
-          token: ${WEBFLOW_TOKEN}
-
-    mappings:                      # mandatory A→B and B→A
-      airtable→webflow: ./maps/at_to_wf.js
-      webflow→airtable: ./maps/wf_to_at.js
-
-    retries:                       # optional; defaults shown
-      max_attempts: 5
-      backoff_sec: 30
-      disable_job_after: 20
-
-    conflict_policy: last_writer_wins   # or manual
+### 4 – JSONC Configuration  
+```jsonc
+{
+  "linkindex": {
+    "driver": "sqlite",
+    "conn": "./syncframe.db"  // DSN or path
+  },
+  "jobs": [
+    {
+      "id": "airtable-revel__webflow-videos",
+      "schedule": "*/5 * * * *",  // cron; omit for manual/CLI-only
+      "sides": {
+        "airtable": {
+          "adapter": "airtable",
+          "table": "Videos",
+          "creds": {
+            "apiKey": "${AIRTABLE_TOKEN}",
+            "baseId": "app123"
+          },
+          "throttle": {  // optional; defaults shown
+            "max_reqs": 50,
+            "interval_sec": 60,
+            "batch_size": 10
+          }
+        },
+        "webflow": {
+          "adapter": "webflow",
+          "collection": "videos",
+          "creds": {
+            "token": "${WEBFLOW_TOKEN}"
+          }
+        }
+      },
+      "mappings": {  // mandatory A→B and B→A
+        "airtable→webflow": "./maps/at_to_wf.js",
+        "webflow→airtable": "./maps/wf_to_at.js"
+      },
+      "retries": {  // optional; defaults shown
+        "max_attempts": 5,
+        "backoff_sec": 30,
+        "disable_job_after": 20
+      },
+      "conflict_policy": "last_writer_wins"  // or "manual"
+    }
+  ]
+}
 ```
 
 *Environment variables are resolved by CLI before objects reach core.*
@@ -202,8 +209,8 @@ jobs:
 | 3 | Implement **InMemoryAdapter** & **InMemoryLinkIndex** for tests | ✅ | – |
 | 4 | Write engine logic (pull-map-push-persist loop, retry, throttle) | ✅ | – |
 | 5 | Create `@syncframe/linkindex-sqlite` (tables above, Drizzle) | ✅ | – |
-| 6 | Build `@syncframe/cli` (YAML parse, env expand, dynamic import) | ✅ | – |
-| 7 | Draft **example YAML** + dummy mapper fn | ✅ | – |
+| 6 | Build `@syncframe/cli` (JSONC parse, env expand, dynamic import) | 🔄 | – |
+| 7 | Draft **example JSONC** + dummy mapper fn | 🔄 | – |
 | 8 | Manual smoke test with in-memory adapters (`syncframe --once`) | – | Dev runs locally |
 | 9 | Build `adapter-airtable` (read/write, cursor via offset token) | Partial | Needs sandbox base & API key |
 | 10 | Build `adapter-webflow` (read/write, cursor via `updated_on`) | Partial | Needs sandbox site & token |
