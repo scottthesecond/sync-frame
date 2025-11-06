@@ -20,6 +20,7 @@ export type {
   SideKey,
   RunSummary,
   LinkIndex,
+  Conflict,
 } from "./types.js";
 
 // Export engine and related types

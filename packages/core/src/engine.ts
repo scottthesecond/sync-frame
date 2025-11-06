@@ -20,6 +20,8 @@ import {
  */
 export interface SideConfig {
   adapter: SourceAdapter;
+  adapterName: string; // e.g., "airtable", "webflow"
+  tableName: string; // e.g., "Videos", "videos"
   sideKey: SideKey;
   throttle?: ThrottleConfig;
 }
@@ -190,8 +192,8 @@ export class SyncEngine {
       }
 
       // Step 2: Pull phase - get updates from both sides
-      const cursorA = await linkIndex.loadCursor(jobId, sideA.sideKey);
-      const cursorB = await linkIndex.loadCursor(jobId, sideB.sideKey);
+      const cursorA = await linkIndex.loadCursor(jobId, sideA.adapterName, sideA.tableName);
+      const cursorB = await linkIndex.loadCursor(jobId, sideB.adapterName, sideB.tableName);
 
       let resultA: { changes: ChangeSet; nextCursor: Cursor };
       let resultB: { changes: ChangeSet; nextCursor: Cursor };
@@ -222,10 +224,12 @@ export class SyncEngine {
       const pushedThisCycle = new Set<string>();
 
       // Process A → B
+      // Pass both changesets so we can look up destination records for conflict detection
       const resultAtoB = await this.transformAndDedup(
         changesA,
-        sideA.sideKey,
-        sideB.sideKey,
+        changesB,
+        sideA,
+        sideB,
         mapperAtoB,
         linkIndex,
         pushedThisCycle,
@@ -235,10 +239,12 @@ export class SyncEngine {
       const linkMapAtoB = resultAtoB.linkMap;
 
       // Process B → A
+      // Pass both changesets so we can look up destination records for conflict detection
       const resultBtoA = await this.transformAndDedup(
         changesB,
-        sideB.sideKey,
-        sideA.sideKey,
+        changesA,
+        sideB,
+        sideA,
         mapperBtoA,
         linkIndex,
         pushedThisCycle,
@@ -262,7 +268,14 @@ export class SyncEngine {
 
         // Update links for successfully pushed records
         for (const [sourceId, destId] of linkMapAtoB) {
-          await linkIndex.upsertLink(sourceId, destId);
+          await linkIndex.upsertLink(
+            sideA.adapterName,
+            sideA.tableName,
+            sourceId,
+            sideB.adapterName,
+            sideB.tableName,
+            destId
+          );
         }
       }
 
@@ -280,13 +293,24 @@ export class SyncEngine {
 
         // Update links for successfully pushed records
         for (const [sourceId, destId] of linkMapBtoA) {
-          await linkIndex.upsertLink(sourceId, destId);
+          await linkIndex.upsertLink(
+            sideB.adapterName,
+            sideB.tableName,
+            sourceId,
+            sideA.adapterName,
+            sideA.tableName,
+            destId
+          );
         }
       }
 
       // Step 5: Persist - save cursors and link upserts
-      await linkIndex.saveCursor(jobId, sideA.sideKey, nextCursorA);
-      await linkIndex.saveCursor(jobId, sideB.sideKey, nextCursorB);
+      await linkIndex.saveCursor(jobId, sideA.adapterName, sideA.tableName, nextCursorA);
+      await linkIndex.saveCursor(jobId, sideB.adapterName, sideB.tableName, nextCursorB);
+      
+      // Reset fail counts on successful run
+      await linkIndex.resetFailCount(jobId, sideA.adapterName, sideA.tableName);
+      await linkIndex.resetFailCount(jobId, sideB.adapterName, sideB.tableName);
 
       const endedAt = new Date();
       const status =
@@ -311,6 +335,37 @@ export class SyncEngine {
         error instanceof Error ? error.message : String(error);
       stats.errors.push(errorMsg);
 
+      // Determine which side(s) failed
+      // For now, we'll increment fail_count for both sides if we can't determine
+      // In the future, we could parse the error to determine which adapter failed
+      const failedSides: SideConfig[] = [];
+      
+      // Try to determine which side failed based on error message
+      if (errorMsg.includes("side A") || errorMsg.includes("sideA")) {
+        failedSides.push(sideA);
+      } else if (errorMsg.includes("side B") || errorMsg.includes("sideB")) {
+        failedSides.push(sideB);
+      } else {
+        // Can't determine, assume both sides failed
+        failedSides.push(sideA, sideB);
+      }
+
+      // Increment fail_count for failed sides and check if we should disable
+      for (const failedSide of failedSides) {
+        const newFailCount = await linkIndex.incrementFailCount(
+          jobId,
+          failedSide.adapterName,
+          failedSide.tableName
+        );
+        
+        if (newFailCount >= retries!.disableJobAfter) {
+          await linkIndex.setJobDisabled(jobId, new Date());
+          this.log(
+            `[${runId}] Job ${jobId} disabled after ${newFailCount} failures for ${failedSide.adapterName}/${failedSide.tableName}`
+          );
+        }
+      }
+
       const endedAt = new Date();
       const summary = this.createRunSummary(
         runId,
@@ -324,10 +379,6 @@ export class SyncEngine {
         }
       );
 
-      // Check if we should disable the job
-      // Note: Since LinkIndex doesn't expose fail_count per cursor,
-      // we'll track failures at the run level. For now, we disable
-      // after consecutive failures in future runs.
       await linkIndex.insertRun(summary);
 
       this.log(`[${runId}] Sync job ${jobId} failed: ${errorMsg}`);
@@ -338,16 +389,31 @@ export class SyncEngine {
   /**
    * Transform and deduplicate changes, preventing echoes and handling conflicts.
    * Returns the transformed changes and a mapping of source IDs to destination IDs.
+   * 
+   * @param sourceChanges - Changes from the source side
+   * @param destChanges - Changes from the destination side (used for conflict detection)
+   * @param sourceSide - Source side configuration
+   * @param destSide - Destination side configuration
+   * @param mapper - Mapper to transform records
+   * @param linkIndex - Link index for lookups
+   * @param pushedThisCycle - Set of IDs already pushed this cycle (echo prevention)
+   * @param stats - Statistics object to update
    */
   private async transformAndDedup(
     sourceChanges: ChangeSet,
-    sourceSide: SideKey,
-    destSide: SideKey,
+    destChanges: ChangeSet,
+    sourceSide: SideConfig,
+    destSide: SideConfig,
     mapper: Mapper,
     linkIndex: LinkIndex,
     pushedThisCycle: Set<string>,
     stats: { conflicts: number; errors: string[] }
   ): Promise<{ changes: ChangeSet; linkMap: Map<string, string> }> {
+    // Create a map of destination records by ID for quick lookup during conflict detection
+    const destRecordsById = new Map<string, Record>();
+    for (const destRec of destChanges.upserts) {
+      destRecordsById.set(destRec.id, destRec);
+    }
     const upserts: SyncRecord[] = [];
     const deletes: RecordID[] = [];
     const linkMap = new Map<string, string>(); // sourceId -> destId
@@ -373,7 +439,11 @@ export class SyncEngine {
       // Check if this destination record already exists and came from the source side
       // This prevents echoes across runs: if destRec.id already has a link pointing back
       // to sourceRec.id, we're trying to sync it back - skip it
-      const existingSourceId = await linkIndex.findSource(destRec.id);
+      const existingSourceId = await linkIndex.findSource(
+        destSide.adapterName,
+        destSide.tableName,
+        destRec.id
+      );
       if (existingSourceId === sourceRec.id) {
         // This record already exists in the destination and came from the source
         // We're trying to sync it back - this is an echo, skip it
@@ -381,13 +451,21 @@ export class SyncEngine {
       }
 
       // Check if this source record already has a link to a different destination
-      const existingDestId = await linkIndex.findDest(sourceRec.id);
+      const existingDestId = await linkIndex.findDest(
+        sourceSide.adapterName,
+        sourceSide.tableName,
+        sourceRec.id
+      );
 
       if (existingDestId) {
         // Record exists on both sides - check for conflicts
+        // A true conflict occurs when BOTH records changed in this cycle
+        const destRecord = destRecordsById.get(existingDestId);
+        
         const conflictHandled = await this.handleConflict(
           sourceRec,
           existingDestId,
+          destRecord || null, // null if destination record didn't change in this cycle
           sourceSide,
           destSide,
           stats
@@ -416,7 +494,11 @@ export class SyncEngine {
         continue;
       }
 
-      const existingDestId = await linkIndex.findDest(sourceId);
+      const existingDestId = await linkIndex.findDest(
+        sourceSide.adapterName,
+        sourceSide.tableName,
+        sourceId
+      );
       if (existingDestId) {
         deletes.push(existingDestId);
         // Track that we processed this source record
@@ -430,40 +512,79 @@ export class SyncEngine {
   /**
    * Handle conflict detection and resolution based on conflict policy.
    * Returns true if the conflict was handled (change should be skipped).
+   * 
+   * @param sourceRec - The source record that changed
+   * @param destId - The destination record ID
+   * @param destRecord - The destination record if it also changed in this cycle (null if it didn't change)
+   * @param sourceSide - Source side configuration
+   * @param destSide - Destination side configuration
+   * @param stats - Statistics object to update
    */
   private async handleConflict(
     sourceRec: SyncRecord,
     destId: string,
-    sourceSide: SideKey,
-    destSide: SideKey,
+    destRecord: SyncRecord | null,
+    sourceSide: SideConfig,
+    destSide: SideConfig,
     stats: { conflicts: number }
   ): Promise<boolean> {
-    const { conflictPolicy } = this.config;
+    const { conflictPolicy, jobId, linkIndex } = this.config;
 
+    // A true conflict only occurs when BOTH records changed in this cycle
+    // If only the source changed, it's just an update, not a conflict
+    if (!destRecord) {
+      // Destination record didn't change - this is just an update, proceed
+      return false;
+    }
+
+    // Both records changed - this is a true conflict
     if (conflictPolicy === "manual") {
-      // For manual conflict resolution, we'd record in conflicts table
-      // but LinkIndex doesn't have that method yet, so we log and skip
+      // Record conflict for manual resolution
+      const conflictId = `conflict_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      await linkIndex.insertConflict({
+        conflictId,
+        jobId,
+        sourceAdapter: sourceSide.adapterName,
+        sourceTable: sourceSide.tableName,
+        sourceId: sourceRec.id,
+        destAdapter: destSide.adapterName,
+        destTable: destSide.tableName,
+        destId: destRecord.id,
+        sourcePayload: sourceRec,
+        destPayload: destRecord,
+        detectedAt: new Date(),
+      });
+      
       stats.conflicts++;
       this.log(
-        `Conflict detected for record ${sourceRec.id} (${sourceSide} → ${destSide}). Manual resolution required.`
+        `Conflict detected for record ${sourceRec.id} (${sourceSide.adapterName}/${sourceSide.tableName} → ${destSide.adapterName}/${destSide.tableName}). Recorded for manual resolution.`
       );
       return true; // Skip this change
     }
 
     // last_writer_wins: compare timestamps
-    // Try common timestamp field names
     const sourceTime = this.extractTimestamp(sourceRec);
-    if (sourceTime === null) {
-      // No timestamp available, assume source is newer and proceed
-      return false;
+    const destTime = this.extractTimestamp(destRecord);
+    
+    if (sourceTime === null || destTime === null) {
+      // No timestamps available - default to source wins
+      this.log(
+        `Conflict detected for record ${sourceRec.id}, but timestamps unavailable. Using source version.`
+      );
+      return false; // Proceed with source
     }
 
-    // For last_writer_wins, we need the destination record's timestamp
-    // But we don't have it here - we'd need to fetch it. For now,
-    // we'll assume source is newer and proceed. In a real implementation,
-    // adapters might provide this via the LinkIndex or we'd fetch it.
-    // This is a limitation we'll work around by proceeding.
-    return false;
+    if (sourceTime >= destTime) {
+      // Source is newer or equal - proceed with source
+      return false;
+    } else {
+      // Destination is newer - skip source change
+      this.log(
+        `Conflict detected for record ${sourceRec.id}. Destination is newer (${destTime} > ${sourceTime}), skipping source change.`
+      );
+      return true; // Skip this change
+    }
   }
 
   /**

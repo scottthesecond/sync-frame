@@ -1,13 +1,13 @@
 /**
  * InMemoryLinkIndex - An in-memory implementation of LinkIndex for testing.
- * Stores links, cursors, job state, and run logs in memory.
+ * Stores links, cursors, job state, run logs, conflicts, and fail counts in memory.
  */
 
 import type {
   LinkIndex,
   Cursor,
   RunSummary,
-  SideKey,
+  Conflict,
 } from "@syncframe/core";
 
 /**
@@ -15,12 +15,16 @@ import type {
  * Useful for testing and development without database dependencies.
  */
 export class InMemoryLinkIndex implements LinkIndex {
-  // Bidirectional link storage: sourceId -> destId and destId -> sourceId
+  // Bidirectional link storage using composite keys
+  // Key format: `${sourceAdapter}:${sourceTable}:${sourceId}` -> `${destAdapter}:${destTable}:${destId}`
   private sourceToDest: Map<string, string>;
   private destToSource: Map<string, string>;
 
-  // Cursor storage: key is `${jobId}:${side}`
+  // Cursor storage: key is `${jobId}:${adapter}:${table}`
   private cursors: Map<string, Cursor>;
+
+  // Fail count storage: key is `${jobId}:${adapter}:${table}`
+  private failCounts: Map<string, number>;
 
   // Job disabled state: key is jobId, value is disabled timestamp
   private disabledJobs: Map<string, Date>;
@@ -28,62 +32,122 @@ export class InMemoryLinkIndex implements LinkIndex {
   // Run logs: key is runId
   private runs: Map<string, RunSummary>;
 
+  // Conflicts: key is conflictId
+  private conflicts: Map<string, Conflict>;
+
   constructor() {
     this.sourceToDest = new Map();
     this.destToSource = new Map();
     this.cursors = new Map();
+    this.failCounts = new Map();
     this.disabledJobs = new Map();
     this.runs = new Map();
+    this.conflicts = new Map();
+  }
+
+  /**
+   * Create a composite key for source records.
+   */
+  private sourceKey(adapter: string, table: string, id: string): string {
+    return `${adapter}:${table}:${id}`;
+  }
+
+  /**
+   * Create a composite key for destination records.
+   */
+  private destKey(adapter: string, table: string, id: string): string {
+    return `${adapter}:${table}:${id}`;
   }
 
   /**
    * Store or update a link between a source record and destination record.
    */
-  async upsertLink(sourceId: string, destId: string): Promise<void> {
+  async upsertLink(
+    sourceAdapter: string,
+    sourceTable: string,
+    sourceId: string,
+    destAdapter: string,
+    destTable: string,
+    destId: string
+  ): Promise<void> {
+    const sourceKey = this.sourceKey(sourceAdapter, sourceTable, sourceId);
+    const destKey = this.destKey(destAdapter, destTable, destId);
+
     // Remove old links if they exist
-    const oldDest = this.sourceToDest.get(sourceId);
+    const oldDest = this.sourceToDest.get(sourceKey);
     if (oldDest) {
       this.destToSource.delete(oldDest);
     }
 
-    const oldSource = this.destToSource.get(destId);
+    const oldSource = this.destToSource.get(destKey);
     if (oldSource) {
       this.sourceToDest.delete(oldSource);
     }
 
     // Create new bidirectional links
-    this.sourceToDest.set(sourceId, destId);
-    this.destToSource.set(destId, sourceId);
+    this.sourceToDest.set(sourceKey, destKey);
+    this.destToSource.set(destKey, sourceKey);
   }
 
   /**
    * Find the destination ID for a given source ID.
    */
-  async findDest(sourceId: string): Promise<string | null> {
-    return this.sourceToDest.get(sourceId) ?? null;
+  async findDest(
+    sourceAdapter: string,
+    sourceTable: string,
+    sourceId: string
+  ): Promise<string | null> {
+    const sourceKey = this.sourceKey(sourceAdapter, sourceTable, sourceId);
+    const destKey = this.sourceToDest.get(sourceKey);
+    
+    if (!destKey) {
+      return null;
+    }
+
+    // Extract just the ID from the composite key (format: "adapter:table:id")
+    const parts = destKey.split(":");
+    return parts.length >= 3 ? parts.slice(2).join(":") : null;
   }
 
   /**
    * Find the source ID for a given destination ID.
    */
-  async findSource(destId: string): Promise<string | null> {
-    return this.destToSource.get(destId) ?? null;
+  async findSource(
+    destAdapter: string,
+    destTable: string,
+    destId: string
+  ): Promise<string | null> {
+    const destKey = this.destKey(destAdapter, destTable, destId);
+    const sourceKey = this.destToSource.get(destKey);
+    
+    if (!sourceKey) {
+      return null;
+    }
+
+    // Extract just the ID from the composite key (format: "adapter:table:id")
+    const parts = sourceKey.split(":");
+    return parts.length >= 3 ? parts.slice(2).join(":") : null;
   }
 
   /**
-   * Load the last known cursor for a job and side.
+   * Load the last known cursor for a job, adapter, and table.
    */
-  async loadCursor(jobId: string, side: SideKey): Promise<Cursor> {
-    const key = `${jobId}:${side}`;
+  async loadCursor(jobId: string, adapter: string, table: string): Promise<Cursor> {
+    const key = `${jobId}:${adapter}:${table}`;
     const cursor = this.cursors.get(key);
-    return cursor ?? { value: null };
+    return cursor ? { ...cursor } : { value: null };
   }
 
   /**
-   * Save a cursor for a job and side.
+   * Save a cursor for a job, adapter, and table.
    */
-  async saveCursor(jobId: string, side: SideKey, cursor: Cursor): Promise<void> {
-    const key = `${jobId}:${side}`;
+  async saveCursor(
+    jobId: string,
+    adapter: string,
+    table: string,
+    cursor: Cursor
+  ): Promise<void> {
+    const key = `${jobId}:${adapter}:${table}`;
     this.cursors.set(key, { ...cursor });
   }
 
@@ -102,11 +166,67 @@ export class InMemoryLinkIndex implements LinkIndex {
   }
 
   /**
+   * Increment the fail count for a specific cursor.
+   */
+  async incrementFailCount(
+    jobId: string,
+    adapter: string,
+    table: string
+  ): Promise<number> {
+    const key = `${jobId}:${adapter}:${table}`;
+    const current = this.failCounts.get(key) || 0;
+    const newCount = current + 1;
+    this.failCounts.set(key, newCount);
+    return newCount;
+  }
+
+  /**
+   * Reset the fail count for a specific cursor.
+   */
+  async resetFailCount(jobId: string, adapter: string, table: string): Promise<void> {
+    const key = `${jobId}:${adapter}:${table}`;
+    this.failCounts.delete(key);
+  }
+
+  /**
+   * Get the current fail count for a specific cursor.
+   */
+  async getFailCount(jobId: string, adapter: string, table: string): Promise<number> {
+    const key = `${jobId}:${adapter}:${table}`;
+    return this.failCounts.get(key) || 0;
+  }
+
+  /**
+   * Insert a conflict record for manual resolution.
+   */
+  async insertConflict(conflict: Conflict): Promise<void> {
+    this.conflicts.set(conflict.conflictId, { ...conflict });
+  }
+
+  /**
+   * Get all unresolved conflicts for a job.
+   */
+  async getConflicts(jobId: string): Promise<Conflict[]> {
+    return Array.from(this.conflicts.values()).filter(
+      (conflict) => conflict.jobId === jobId
+    );
+  }
+
+  /**
+   * Mark a conflict as resolved (delete it).
+   */
+  async resolveConflict(conflictId: string): Promise<void> {
+    this.conflicts.delete(conflictId);
+  }
+
+  /**
    * Insert a summary record for a sync run.
    */
   async insertRun(run: RunSummary): Promise<void> {
     this.runs.set(run.runId, { ...run });
   }
+
+  // --- Helper methods for testing/debugging ---
 
   /**
    * Get all runs for a job (useful for testing/debugging).
@@ -131,12 +251,49 @@ export class InMemoryLinkIndex implements LinkIndex {
 
   /**
    * Get all links (useful for testing/debugging).
+   * Returns simplified format with just IDs (not full composite keys).
    */
-  getAllLinks(): Array<{ sourceId: string; destId: string }> {
-    return Array.from(this.sourceToDest.entries()).map(([sourceId, destId]) => ({
-      sourceId,
-      destId,
-    }));
+  getAllLinks(): Array<{
+    sourceAdapter: string;
+    sourceTable: string;
+    sourceId: string;
+    destAdapter: string;
+    destTable: string;
+    destId: string;
+  }> {
+    const links: Array<{
+      sourceAdapter: string;
+      sourceTable: string;
+      sourceId: string;
+      destAdapter: string;
+      destTable: string;
+      destId: string;
+    }> = [];
+
+    for (const [sourceKey, destKey] of this.sourceToDest.entries()) {
+      const sourceParts = sourceKey.split(":");
+      const destParts = destKey.split(":");
+
+      if (sourceParts.length >= 3 && destParts.length >= 3) {
+        links.push({
+          sourceAdapter: sourceParts[0],
+          sourceTable: sourceParts[1],
+          sourceId: sourceParts.slice(2).join(":"),
+          destAdapter: destParts[0],
+          destTable: destParts[1],
+          destId: destParts.slice(2).join(":"),
+        });
+      }
+    }
+
+    return links;
+  }
+
+  /**
+   * Get all conflicts (useful for testing/debugging).
+   */
+  getAllConflicts(): Conflict[] {
+    return Array.from(this.conflicts.values());
   }
 
   /**
@@ -146,8 +303,10 @@ export class InMemoryLinkIndex implements LinkIndex {
     this.sourceToDest.clear();
     this.destToSource.clear();
     this.cursors.clear();
+    this.failCounts.clear();
     this.disabledJobs.clear();
     this.runs.clear();
+    this.conflicts.clear();
   }
 
   /**
@@ -157,4 +316,3 @@ export class InMemoryLinkIndex implements LinkIndex {
     this.disabledJobs.delete(jobId);
   }
 }
-

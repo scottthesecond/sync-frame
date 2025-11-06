@@ -83,6 +83,23 @@ export interface Mapper {
 export type SideKey = string;
 
 /**
+ * Conflict record for manual resolution.
+ */
+export interface Conflict {
+  conflictId: string;
+  jobId: string;
+  sourceAdapter: string;
+  sourceTable: string;
+  sourceId: string;
+  destAdapter: string;
+  destTable: string;
+  destId: string;
+  sourcePayload: Record;
+  destPayload: Record;
+  detectedAt: Date;
+}
+
+/**
  * Summary of a sync run.
  */
 export interface RunSummary {
@@ -102,29 +119,70 @@ export interface LinkIndex {
   // --- Links ---
   /**
    * Store or update a link between a source record and destination record.
+   * @param sourceAdapter - Name of the source adapter (e.g., "airtable")
+   * @param sourceTable - Name of the source table/collection (e.g., "Videos")
+   * @param sourceId - ID of the source record
+   * @param destAdapter - Name of the destination adapter (e.g., "webflow")
+   * @param destTable - Name of the destination table/collection (e.g., "videos")
+   * @param destId - ID of the destination record
    */
-  upsertLink(sourceId: string, destId: string): Promise<void>;
+  upsertLink(
+    sourceAdapter: string,
+    sourceTable: string,
+    sourceId: string,
+    destAdapter: string,
+    destTable: string,
+    destId: string
+  ): Promise<void>;
 
   /**
    * Find the destination ID for a given source ID.
+   * @param sourceAdapter - Name of the source adapter
+   * @param sourceTable - Name of the source table/collection
+   * @param sourceId - ID of the source record
+   * @returns The destination ID, or null if no link exists
    */
-  findDest(sourceId: string): Promise<string | null>;
+  findDest(
+    sourceAdapter: string,
+    sourceTable: string,
+    sourceId: string
+  ): Promise<string | null>;
 
   /**
    * Find the source ID for a given destination ID.
+   * @param destAdapter - Name of the destination adapter
+   * @param destTable - Name of the destination table/collection
+   * @param destId - ID of the destination record
+   * @returns The source ID, or null if no link exists
    */
-  findSource(destId: string): Promise<string | null>;
+  findSource(
+    destAdapter: string,
+    destTable: string,
+    destId: string
+  ): Promise<string | null>;
 
   // --- Cursors ---
   /**
-   * Load the last known cursor for a job and side.
+   * Load the last known cursor for a job, adapter, and table.
+   * @param jobId - The job ID
+   * @param adapter - Name of the adapter (e.g., "airtable")
+   * @param table - Name of the table/collection (e.g., "Videos")
    */
-  loadCursor(jobId: string, side: SideKey): Promise<Cursor>;
+  loadCursor(jobId: string, adapter: string, table: string): Promise<Cursor>;
 
   /**
-   * Save a cursor for a job and side.
+   * Save a cursor for a job, adapter, and table.
+   * @param jobId - The job ID
+   * @param adapter - Name of the adapter
+   * @param table - Name of the table/collection
+   * @param cursor - The cursor to save
    */
-  saveCursor(jobId: string, side: SideKey, cursor: Cursor): Promise<void>;
+  saveCursor(
+    jobId: string,
+    adapter: string,
+    table: string,
+    cursor: Cursor
+  ): Promise<void>;
 
   // --- Job State ---
   /**
@@ -136,6 +194,57 @@ export interface LinkIndex {
    * Check if a job is currently disabled.
    */
   isJobDisabled(jobId: string): Promise<boolean>;
+
+  // --- Fail Count Tracking ---
+  /**
+   * Increment the fail count for a specific cursor.
+   * @param jobId - The job ID
+   * @param adapter - Name of the adapter
+   * @param table - Name of the table/collection
+   * @returns The new fail count after incrementing
+   */
+  incrementFailCount(
+    jobId: string,
+    adapter: string,
+    table: string
+  ): Promise<number>;
+
+  /**
+   * Reset the fail count for a specific cursor (typically after a successful run).
+   * @param jobId - The job ID
+   * @param adapter - Name of the adapter
+   * @param table - Name of the table/collection
+   */
+  resetFailCount(jobId: string, adapter: string, table: string): Promise<void>;
+
+  /**
+   * Get the current fail count for a specific cursor.
+   * @param jobId - The job ID
+   * @param adapter - Name of the adapter
+   * @param table - Name of the table/collection
+   * @returns The current fail count
+   */
+  getFailCount(jobId: string, adapter: string, table: string): Promise<number>;
+
+  // --- Conflicts ---
+  /**
+   * Insert a conflict record for manual resolution.
+   * @param conflict - The conflict details
+   */
+  insertConflict(conflict: Conflict): Promise<void>;
+
+  /**
+   * Get all unresolved conflicts for a job.
+   * @param jobId - The job ID
+   * @returns Array of conflict records
+   */
+  getConflicts(jobId: string): Promise<Conflict[]>;
+
+  /**
+   * Mark a conflict as resolved (delete it).
+   * @param conflictId - The conflict ID
+   */
+  resolveConflict(conflictId: string): Promise<void>;
 
   // --- Run Logs ---
   /**

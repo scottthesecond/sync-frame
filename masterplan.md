@@ -31,16 +31,27 @@ interface Mapper {
 }
 interface LinkIndex {
   /** links */
-  upsertLink(sourceId: string, destId: string): void
-  findDest(sourceId: string): string | null
-  findSource(destId: string): string | null
+  upsertLink(
+    sourceAdapter: string, sourceTable: string, sourceId: string,
+    destAdapter: string, destTable: string, destId: string
+  ): Promise<void>
+  findDest(sourceAdapter: string, sourceTable: string, sourceId: string): Promise<string | null>
+  findSource(destAdapter: string, destTable: string, destId: string): Promise<string | null>
   /** cursors */
-  loadCursor(jobId: string, side: SideKey): Cursor
-  saveCursor(jobId: string, side: SideKey, cursor: Cursor): void
+  loadCursor(jobId: string, adapter: string, table: string): Promise<Cursor>
+  saveCursor(jobId: string, adapter: string, table: string, cursor: Cursor): Promise<void>
   /** job state & runs */
-  setJobDisabled(jobId: string, ts: Date): void
-  isJobDisabled(jobId: string): boolean
-  insertRun(run: RunSummary): void
+  setJobDisabled(jobId: string, ts: Date): Promise<void>
+  isJobDisabled(jobId: string): Promise<boolean>
+  insertRun(run: RunSummary): Promise<void>
+  /** fail count tracking */
+  incrementFailCount(jobId: string, adapter: string, table: string): Promise<number>
+  resetFailCount(jobId: string, adapter: string, table: string): Promise<void>
+  getFailCount(jobId: string, adapter: string, table: string): Promise<number>
+  /** conflicts (for manual resolution) */
+  insertConflict(conflict: Conflict): Promise<void>
+  getConflicts(jobId: string): Promise<Conflict[]>
+  resolveConflict(conflictId: string): Promise<void>
 }
 ```
 
@@ -80,11 +91,17 @@ runs(
   summary_json  JSONB
 );
 
-conflicts(                       -- only if conflict_policy=manual
+conflicts(                       -- for conflict_policy=manual
+  conflict_id   TEXT PRIMARY KEY,
   job_id        TEXT,
+  src_adapter   TEXT,
+  src_table     TEXT,
   src_id        TEXT,
+  dest_adapter  TEXT,
+  dest_table    TEXT,
   dest_id       TEXT,
-  payload_json  JSONB,
+  src_payload   JSONB,           -- full source record
+  dest_payload  JSONB,           -- full destination record
   detected_at   TIMESTAMP
 );
 ```
@@ -151,13 +168,18 @@ conflicts(                       -- only if conflict_policy=manual
 3. **Transform & Dedup:**  
    - map each record through appropriate `Mapper` function.  
    - use `LinkIndex` to find opposite IDs; prevent echoes.  
+   - detect conflicts: a conflict occurs when BOTH records changed in the same cycle.  
+   - for `last_writer_wins`: compare timestamps, use newer record.  
+   - for `manual`: record in `conflicts` table with both payloads, skip change.  
 4. **Push phase (batched):**  
    - obey per-side `batch_size` & `throttle` window.  
    - retry with exponential back-off ≤ `max_attempts`.  
+   - on retry failure after `max_attempts`, increment `fail_count` for that side.  
 5. **Persist:** cursors, link upserts, `runs` summary row.  
+   - on success: reset `fail_count` for both sides.  
 6. **Error handling:**  
-   - after `max_attempts`, increment `fail_count`.  
-   - if `fail_count` ≥ `disable_job_after`, set `disabled_at` timestamp.  
+   - after `max_attempts` failures, increment `fail_count` for the failed side(s).  
+   - if `fail_count` ≥ `disable_job_after` for any side, set `disabled_at` timestamp for the job.  
 
 ---
 
@@ -165,7 +187,7 @@ conflicts(                       -- only if conflict_policy=manual
 | Area | Decision |
 |------|----------|
 | **Soft delete only** | Adapters map a boolean `isDeleted` (or similar). Dest adapter decides whether to hard-delete or soft-flag. |
-| **Conflict policies** | `last_writer_wins` (timestamp compare) **or** `manual` → record in `conflicts` table; change skipped. |
+| **Conflict policies** | `last_writer_wins` (timestamp compare) **or** `manual` → record in `conflicts` table with both full payloads; change skipped. Conflicts only detected when BOTH records changed in the same sync cycle. |
 | **Retry** | Configurable; exponential back-off starting at `backoff_sec`. |
 | **Throttle** | Sliding-window counter: `max_reqs` within `interval_sec`. |
 
