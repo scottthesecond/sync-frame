@@ -201,7 +201,7 @@ jobs:
 | 2 | Scaffold `@syncframe/core` with typed interfaces & empty engine | ✅ | – |
 | 3 | Implement **InMemoryAdapter** & **InMemoryLinkIndex** for tests | ✅ | – |
 | 4 | Write engine logic (pull-map-push-persist loop, retry, throttle) | ✅ | – |
-| 5 | Create `@syncframe/linkindex-sqlite` (tables above, Knex/Drizzle) | ✅ | – |
+| 5 | Create `@syncframe/linkindex-sqlite` (tables above, Drizzle) | ✅ | – |
 | 6 | Build `@syncframe/cli` (YAML parse, env expand, dynamic import) | ✅ | – |
 | 7 | Draft **example YAML** + dummy mapper fn | ✅ | – |
 | 8 | Manual smoke test with in-memory adapters (`syncframe --once`) | – | Dev runs locally |
@@ -214,4 +214,3 @@ jobs:
 
 ---
 
-When the list hits step 11 with green tests, SyncFrame MVP is production-ready for the first 2-way job.
