@@ -1,0 +1,41 @@
+{
+  "name": "@syncframe/cli",
+  "version": "0.1.0",
+  "description": "CLI for SyncFrame - parses JSONC config, loads adapters, and runs sync jobs",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "syncframe": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "jest"
+  },
+  "keywords": ["sync", "cli", "configuration"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@syncframe/core": "*",
+    "commander": "^12.0.0",
+    "dotenv": "^16.4.5",
+    "jsonc-parser": "^3.2.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.3.0"
+  }
+}
+
