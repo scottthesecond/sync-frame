@@ -354,12 +354,33 @@ export class SyncEngine {
 
     // Process upserts
     for (const sourceRec of sourceChanges.upserts) {
-      // Skip if we just pushed this record in this cycle (echo prevention)
+      // Skip if we just pushed this record in this cycle (echo prevention within same run)
       if (pushedThisCycle.has(sourceRec.id)) {
         continue;
       }
 
-      // Check if this record already has a link
+      // Transform the record to get the destination ID
+      let destRec: SyncRecord;
+      try {
+        destRec = mapper.toDest(sourceRec);
+      } catch (error) {
+        const msg = `Failed to map record ${sourceRec.id}: ${error}`;
+        stats.errors.push(msg);
+        this.log(`Warning: ${msg}`);
+        continue;
+      }
+
+      // Check if this destination record already exists and came from the source side
+      // This prevents echoes across runs: if destRec.id already has a link pointing back
+      // to sourceRec.id, we're trying to sync it back - skip it
+      const existingSourceId = await linkIndex.findSource(destRec.id);
+      if (existingSourceId === sourceRec.id) {
+        // This record already exists in the destination and came from the source
+        // We're trying to sync it back - this is an echo, skip it
+        continue;
+      }
+
+      // Check if this source record already has a link to a different destination
       const existingDestId = await linkIndex.findDest(sourceRec.id);
 
       if (existingDestId) {
@@ -376,21 +397,16 @@ export class SyncEngine {
         }
         // Use existing link
         linkMap.set(sourceRec.id, existingDestId);
-      }
-
-      // Transform the record
-      try {
-        const destRec = mapper.toDest(sourceRec);
-        upserts.push(destRec);
+      } else {
+        // New record - use the transformed destination ID
         linkMap.set(sourceRec.id, destRec.id);
-
-        // Track that we'll push this source record
-        pushedThisCycle.add(sourceRec.id);
-      } catch (error) {
-        const msg = `Failed to map record ${sourceRec.id}: ${error}`;
-        stats.errors.push(msg);
-        this.log(`Warning: ${msg}`);
       }
+
+      // Add to upserts
+      upserts.push(destRec);
+
+      // Track that we'll push this source record
+      pushedThisCycle.add(sourceRec.id);
     }
 
     // Process deletes
